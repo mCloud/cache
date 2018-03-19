@@ -100,6 +100,12 @@ func (c *localCache) GetIfPresent(k Key) (Value, bool) {
 		c.stats.RecordMisses(1)
 		return nil, false
 	}
+
+	// Check if this entry expired
+	if c.expireAfterAccess > 0 && en.accessed.Before(currentTime().Add(-c.expireAfterAccess)) {
+		return nil, false
+	}
+
 	v := getEntry(el).value
 	c.hitEntry <- el
 	c.stats.RecordHits(1)
@@ -153,10 +159,16 @@ func (c *localCache) Get(k Key) (Value, error) {
 	}
 	c.stats.RecordHits(1)
 	en := getEntry(el)
+
+	// Check if this entry expired
+	if c.expireAfterAccess > 0 && en.accessed.Before(currentTime().Add(-c.expireAfterAccess)) {
+		return c.refresh(en), nil
+	}
 	// Check if this entry needs to be refreshed
 	if c.refreshAfterWrite > 0 && en.updated.Before(currentTime().Add(-c.refreshAfterWrite)) {
 		return c.refresh(en), nil
 	}
+
 	v := en.value
 	c.hitEntry <- el
 	return v, nil
