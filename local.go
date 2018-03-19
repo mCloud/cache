@@ -101,12 +101,14 @@ func (c *localCache) GetIfPresent(k Key) (Value, bool) {
 		return nil, false
 	}
 
+	en := getEntry(el)
+
 	// Check if this entry expired
 	if c.expireAfterAccess > 0 && en.accessed.Before(currentTime().Add(-c.expireAfterAccess)) {
 		return nil, false
 	}
 
-	v := getEntry(el).value
+	v := en.value
 	c.hitEntry <- el
 	c.stats.RecordHits(1)
 	return v, true
