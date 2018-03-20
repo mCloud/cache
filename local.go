@@ -133,6 +133,37 @@ func (c *localCache) Put(k Key, v Value) {
 	}
 }
 
+// Reload value from loader
+func (c *localCache) Reload(k Key) (Value, error) {
+	c.cache.mu.RLock()
+	el, hit := c.cache.data[k]
+	c.cache.mu.RUnlock()
+
+	// load new value
+	start := currentTime()
+	newV, err := c.loader(k)
+	loadTime := currentTime().Sub(start)
+	if err != nil {
+		c.stats.RecordLoadError(loadTime)
+		return newV, err
+	}
+
+	if hit {
+		// Update list element value
+		getEntry(el).value = newV
+		c.hitEntry <- el
+	} else {
+		en := &entry{
+			key:   k,
+			value: newV,
+			hash:  sum(k),
+		}
+		c.addEntry <- en
+	}
+
+	return newV, nil
+}
+
 // Invalidate removes the entry associated with key k.
 func (c *localCache) Invalidate(k Key) {
 	c.cache.mu.RLock()
