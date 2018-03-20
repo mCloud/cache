@@ -14,6 +14,12 @@ The TinyLFU implementation is inspired by
 [Caffeine](https://github.com/ben-manes/caffeine) by Ben Manes and
 [go-tinylfu](https://github.com/dgryski/go-tinylfu) by Damian Gryski.
 
+### Improvement
+- **[Cache.GetIfPresent]**  return nil while value expired
+- **[LoadingCache.Get]** refresh value if expired
+- **[LoadingCache.Reload]** new added. force reload value from loader 
+
+
 ## Download
 
 ```
