@@ -45,6 +45,7 @@ type LoadingCache interface {
 	// Get returns value associated with Key or call underlying LoaderFunc
 	// to load value if it is not present.
 	Get(Key) (Value, error)
+	Reload(k Key) (Value, error)
 }
 
 // LoaderFunc retrieves the value corresponding to given Key.

@@ -17,7 +17,7 @@ The TinyLFU implementation is inspired by
 ### Improvement
 - **[Cache.GetIfPresent]**  return nil while value expired
 - **[LoadingCache.Get]** refresh value if expired
-- **[LoadingCache.Reload]** new added. force reload value from loader 
+- **[LoadingCache.Reload]** *new API*. force reload value from loader 
 
 
 ## Download
