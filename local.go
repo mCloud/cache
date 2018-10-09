@@ -9,12 +9,12 @@ import (
 
 const (
 	// Default maximum number of cache entries.
-	defaultCapacity = 1<<15 - 1
-	maximumCapacity = 1<<31 - 1
+	maximumCapacity = 1 << 30
 	// Buffer size of entry channels
 	chanBufSize = 1
 	// Maximum number of entries to be drained in a single clean up.
-	drainMax       = 16
+	drainMax = 16
+	// Number of cache access operations that will trigger clean up.
 	drainThreshold = 64
 )
 
@@ -26,6 +26,7 @@ type localCache struct {
 	// user configurations
 	policyName        string
 	expireAfterAccess time.Duration
+	expireAfterWrite  time.Duration
 	refreshAfterWrite time.Duration
 
 	onInsertion Func
@@ -55,7 +56,7 @@ type localCache struct {
 // init must be called before this cache can be used.
 func newLocalCache() *localCache {
 	return &localCache{
-		cap: defaultCapacity,
+		cap: maximumCapacity,
 		cache: cache{
 			data: make(map[Key]*list.Element),
 		},
@@ -100,18 +101,15 @@ func (c *localCache) GetIfPresent(k Key) (Value, bool) {
 		c.stats.RecordMisses(1)
 		return nil, false
 	}
-
 	en := getEntry(el)
-
-	// Check if this entry expired
-	if c.expireAfterAccess > 0 && en.accessed.Before(currentTime().Add(-c.expireAfterAccess)) {
+	if c.isExpired(en, currentTime()) {
+		c.deleteEntry <- el
+		c.stats.RecordMisses(1)
 		return nil, false
 	}
-
-	v := en.value
 	c.hitEntry <- el
 	c.stats.RecordHits(1)
-	return v, true
+	return en.value, true
 }
 
 // Put adds new entry to entries list.
@@ -190,18 +188,20 @@ func (c *localCache) Get(k Key) (Value, error) {
 		c.stats.RecordMisses(1)
 		return c.load(k)
 	}
-	c.stats.RecordHits(1)
 	en := getEntry(el)
-
-	// Check if this entry expired
-	if c.expireAfterAccess > 0 && en.accessed.Before(currentTime().Add(-c.expireAfterAccess)) {
+	// Check if this entry needs to be refreshed
+	if c.isExpired(en, currentTime()) {
+		c.stats.RecordMisses(1)
 		return c.refresh(en), nil
 	}
+
 	// Check if this entry needs to be refreshed
 	if c.refreshAfterWrite > 0 && en.updated.Before(currentTime().Add(-c.refreshAfterWrite)) {
+		c.stats.RecordMisses(1)
 		return c.refresh(en), nil
 	}
 
+	c.stats.RecordHits(1)
 	v := en.value
 	c.hitEntry <- el
 	return v, nil
@@ -368,6 +368,16 @@ func (c *localCache) expireEntries() {
 	})
 }
 
+func (c *localCache) isExpired(en *entry, now time.Time) bool {
+	if c.expireAfterAccess > 0 && en.accessed.Before(now.Add(-c.expireAfterAccess)) {
+		return true
+	}
+	if c.expireAfterWrite > 0 && en.updated.Before(now.Add(-c.expireAfterWrite)) {
+		return true
+	}
+	return false
+}
+
 // New returns a local in-memory Cache.
 func New(options ...Option) Cache {
 	c := newLocalCache()
@@ -420,6 +430,14 @@ func WithRemovalListener(onRemoval Func) Option {
 func WithExpireAfterAccess(d time.Duration) Option {
 	return func(c *localCache) {
 		c.expireAfterAccess = d
+	}
+}
+
+// WithExpireAfterWrite returns an option to expire a cache entry after the
+// given duration from creation.
+func WithExpireAfterWrite(d time.Duration) Option {
+	return func(c *localCache) {
+		c.expireAfterWrite = d
 	}
 }
 
