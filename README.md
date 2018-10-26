@@ -15,9 +15,10 @@ The TinyLFU implementation is inspired by
 [go-tinylfu](https://github.com/dgryski/go-tinylfu) by Damian Gryski.
 
 ### Improvement
-- **[Cache.GetIfPresent]**  return nil while value expired
+- **[Cache.GetIfPresent]**  return nil while value expired. ignore LoadingCache.refreshAfterWrite
 - **[LoadingCache.Get]** refresh value if expired
 - **[LoadingCache.Reload]** *new API*. force reload value from loader 
+- **[Cache.Put,Invalidate]** sync with timeout. **Cache.Put(k, v).Sync() / Cache.Put(k, v).Wait(time.Second)**
 
 
 ## Download

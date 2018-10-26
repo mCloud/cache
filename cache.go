@@ -18,13 +18,13 @@ type Cache interface {
 
 	// Put associates value with Key. If a value is already associated
 	// with Key, the old one will be replaced with Value.
-	Put(Key, Value)
+	Put(Key, Value) Future
 
 	// Invalidate discards cached value of the given Key.
-	Invalidate(Key)
+	Invalidate(Key) Future
 
 	// InvalidateAll discards all entries.
-	InvalidateAll()
+	InvalidateAll() Future
 
 	// Stats copies cache statistics to given Stats pointer.
 	Stats(*Stats)
@@ -45,7 +45,7 @@ type LoadingCache interface {
 	// Get returns value associated with Key or call underlying LoaderFunc
 	// to load value if it is not present.
 	Get(Key) (Value, error)
-	Reload(k Key) (Value, error)
+	Reload(k Key) (Value, Future, error)
 }
 
 // LoaderFunc retrieves the value corresponding to given Key.

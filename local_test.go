@@ -2,6 +2,7 @@ package cache
 
 import (
 	"errors"
+	"fmt"
 	"math/rand"
 	"sync"
 	"testing"
@@ -295,6 +296,65 @@ func TestExpireAfterWrite(t *testing.T) {
 	if v.(int) != 2 || loadCount != 2 {
 		t.Fatalf("unexpected load count: %v, %v", v, loadCount)
 	}
+}
+
+func TestSync(t *testing.T) {
+	loadCount := 0
+	loader := func(k Key) (Value, error) {
+		loadCount++
+		return loadCount, nil
+	}
+
+	mockTime := newMockTime()
+	currentTime = mockTime.now
+	c := NewLoadingCache(loader, WithExpireAfterWrite(1*time.Second))
+	defer c.Close()
+
+	c.Put("2", 2).Sync()
+	v, err := c.Get("2")
+	if err != nil || v != 2 {
+		t.Fatal(err)
+	}
+}
+
+func TestFullGc(t *testing.T) {
+	ins := func(k Key, v Value) {
+		fmt.Println("insert", k)
+	}
+	rev := func(k Key, v Value) {
+		fmt.Println("remove", k)
+	}
+	loadCount := 0
+	loader := func(k Key) (Value, error) {
+		loadCount++
+		return loadCount, nil
+	}
+
+	currentTime = time.Now
+	c := NewLoadingCache(loader, WithExpireAfterAccess(1*time.Second), WithRemovalListener(rev),
+		withInsertionListener(ins), WithFullGcDuration(3*time.Second)).(*localCache)
+	defer c.Close()
+
+	c.Put(1, 1).Sync()
+	c.Put(2, 2).Sync()
+	c.Put(3, 3).Sync()
+	c.Put(4, 4).Sync()
+
+	// no GC occur
+	time.Sleep(time.Second * 2)
+	n := cacheSize(&c.cache)
+	if n != 4 {
+		t.Fatalf("unexpected cache size: %d, want: %d", n, 0)
+	}
+	fmt.Printf("=== ExpireAfterAccess reach, but NOT gc, size=%d\n", n)
+
+	// reach fullGC time
+	time.Sleep(time.Second * 1 + time.Millisecond * 10) // give GC a break
+	n = cacheSize(&c.cache)
+	if n != 0 {
+		t.Fatalf("unexpected cache size: %d, want: %d", n, 0)
+	}
+	fmt.Printf("=== fullGc reach, size=%d\n", n)
 }
 
 func TestDoubleClose(t *testing.T) {

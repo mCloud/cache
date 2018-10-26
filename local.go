@@ -28,6 +28,7 @@ type localCache struct {
 	expireAfterAccess time.Duration
 	expireAfterWrite  time.Duration
 	refreshAfterWrite time.Duration
+	fullGcDuration    time.Duration
 
 	onInsertion Func
 	onRemoval   Func
@@ -40,9 +41,9 @@ type localCache struct {
 	cache cache
 
 	entries     policy
-	addEntry    chan *entry
+	addEntry    chan *optWrapper
 	hitEntry    chan *list.Element
-	deleteEntry chan *list.Element
+	deleteEntry chan *optWrapper
 
 	// readCount is a counter of the number of reads since the last write.
 	readCount int32
@@ -69,9 +70,9 @@ func (c *localCache) init() {
 	c.entries = newPolicy(c.policyName)
 	c.entries.init(&c.cache, c.cap)
 
-	c.addEntry = make(chan *entry, chanBufSize)
+	c.addEntry = make(chan *optWrapper, chanBufSize)
 	c.hitEntry = make(chan *list.Element, chanBufSize)
-	c.deleteEntry = make(chan *list.Element, chanBufSize)
+	c.deleteEntry = make(chan *optWrapper, chanBufSize)
 
 	c.closeCh = make(chan struct{})
 	go c.processEntries()
@@ -103,7 +104,7 @@ func (c *localCache) GetIfPresent(k Key) (Value, bool) {
 	}
 	en := getEntry(el)
 	if c.isExpired(en, currentTime()) {
-		c.deleteEntry <- el
+		c.deleteEntry <- newOptWrapper(el)
 		c.stats.RecordMisses(1)
 		return nil, false
 	}
@@ -113,68 +114,77 @@ func (c *localCache) GetIfPresent(k Key) (Value, bool) {
 }
 
 // Put adds new entry to entries list.
-func (c *localCache) Put(k Key, v Value) {
+func (c *localCache) Put(k Key, v Value) Future {
 	c.cache.mu.RLock()
 	el, hit := c.cache.data[k]
 	c.cache.mu.RUnlock()
 	if hit {
 		// Update list element value
-		getEntry(el).value = v
+		en := getEntry(el)
+		en.value = v
+
+		en.updated = currentTime()
 		c.hitEntry <- el
+		return doneFuture
 	} else {
-		en := &entry{
-			key:   k,
-			value: v,
-			hash:  sum(k),
-		}
-		c.addEntry <- en
+		wrapper := newOptWrapper(
+			&entry{
+				key:   k,
+				value: v,
+				hash:  sum(k),
+			})
+		c.addEntry <- wrapper
+
+		return wrapper.future
 	}
 }
 
 // Reload value from loader
-func (c *localCache) Reload(k Key) (Value, error) {
+func (c *localCache) Reload(k Key) (Value, Future, error) {
 	c.cache.mu.RLock()
 	el, hit := c.cache.data[k]
 	c.cache.mu.RUnlock()
-
-	// load new value
-	start := currentTime()
-	newV, err := c.loader(k)
-	loadTime := currentTime().Sub(start)
-	if err != nil {
-		c.stats.RecordLoadError(loadTime)
-		return newV, err
-	}
-
 	if hit {
-		// Update list element value
-		getEntry(el).value = newV
-		c.hitEntry <- el
+		return c.refresh(getEntry(el)), doneFuture, nil
 	} else {
-		en := &entry{
-			key:   k,
-			value: newV,
-			hash:  sum(k),
+		v, e := c.load(k)
+		if e != nil {
+			return nil, failFuture, e
 		}
-		c.addEntry <- en
-	}
 
-	return newV, nil
+		wrapper := newOptWrapper(
+			&entry{
+				key:   k,
+				value: v,
+				hash:  sum(k),
+			})
+		c.addEntry <- wrapper
+		return v, wrapper.future, nil
+	}
 }
 
 // Invalidate removes the entry associated with key k.
-func (c *localCache) Invalidate(k Key) {
+func (c *localCache) Invalidate(k Key) Future {
 	c.cache.mu.RLock()
 	el, hit := c.cache.data[k]
 	c.cache.mu.RUnlock()
-	if hit {
-		c.deleteEntry <- el
+
+	if !hit {
+		return doneFuture
 	}
+
+	wrapper := newOptWrapper(el)
+	c.deleteEntry <- wrapper
+
+	return wrapper.future
 }
 
 // InvalidateAll resets entries list.
-func (c *localCache) InvalidateAll() {
-	c.deleteEntry <- nil
+func (c *localCache) InvalidateAll() Future {
+	wrapper := newOptWrapper(nil)
+	c.deleteEntry <- wrapper
+
+	return wrapper.future
 }
 
 // Get returns value associated with k or call underlying loader to retrieve value
@@ -189,14 +199,9 @@ func (c *localCache) Get(k Key) (Value, error) {
 		return c.load(k)
 	}
 	en := getEntry(el)
-	// Check if this entry needs to be refreshed
-	if c.isExpired(en, currentTime()) {
-		c.stats.RecordMisses(1)
-		return c.refresh(en), nil
-	}
-
-	// Check if this entry needs to be refreshed
-	if c.refreshAfterWrite > 0 && en.updated.Before(currentTime().Add(-c.refreshAfterWrite)) {
+	// Check if this entry needs to be refreshed: Expired or need refresh
+	if c.isExpired(en, currentTime()) ||
+		(c.refreshAfterWrite > 0 && en.updated.Before(currentTime().Add(-c.refreshAfterWrite))) {
 		c.stats.RecordMisses(1)
 		return c.refresh(en), nil
 	}
@@ -214,24 +219,36 @@ func (c *localCache) Stats(t *Stats) {
 
 func (c *localCache) processEntries() {
 	defer close(c.closeCh)
+
+	gcTime := c.fullGcDuration
+	if gcTime <= 0 {
+		gcTime = 1<<63 - 1
+	}
+	gcTicker := time.NewTicker(gcTime)
+
 	for {
 		select {
 		case <-c.closeCh:
+			gcTicker.Stop()
 			c.removeAll()
 			return
-		case en := <-c.addEntry:
-			c.add(en)
+		case wp := <-c.addEntry:
+			c.add(wp.meta.(*entry))
+			wp.future.done()
 			c.postWriteCleanup()
 		case el := <-c.hitEntry:
 			c.hit(el)
 			c.postReadCleanup()
-		case el := <-c.deleteEntry:
-			if el == nil {
+		case wp := <-c.deleteEntry:
+			if wp.meta == nil {
 				c.removeAll()
 			} else {
-				c.remove(el)
+				c.remove(wp.meta.(*list.Element))
 			}
+			wp.future.done()
 			c.postReadCleanup()
+		case <-gcTicker.C:
+			c.fullCleanup()
 		}
 	}
 }
@@ -298,12 +315,15 @@ func (c *localCache) load(k Key) (Value, error) {
 		c.stats.RecordLoadError(loadTime)
 		return nil, err
 	}
-	en := &entry{
-		key:   k,
-		value: v,
-		hash:  sum(k),
+
+	c.addEntry <- &optWrapper{
+		future: make(Future, 1),
+		meta: &entry{
+			key:   k,
+			value: v,
+			hash:  sum(k),
+		},
 	}
-	c.addEntry <- en
 	c.stats.RecordLoadSuccess(loadTime)
 	return v, nil
 }
@@ -324,7 +344,11 @@ func (c *localCache) refresh(en *entry) Value {
 		return en.value
 	}
 	en.value = newV
-	c.addEntry <- en
+
+	c.addEntry <- &optWrapper{
+		future: make(Future, 1),
+		meta:   en,
+	}
 	c.stats.RecordLoadSuccess(loadTime)
 	return newV
 }
@@ -341,6 +365,24 @@ func (c *localCache) postReadCleanup() {
 func (c *localCache) postWriteCleanup() {
 	atomic.StoreInt32(&c.readCount, 0)
 	c.expireEntries()
+}
+
+// full GC
+func (c *localCache) fullCleanup() {
+	atomic.StoreInt32(&c.readCount, 0)
+
+	c.entries.walk(func(ls *list.List) {
+		var prev *list.Element
+		for el := ls.Back(); el != nil; el = prev {
+			prev = el.Prev()
+
+			en := getEntry(el)
+			if c.isExpired(en, currentTime()) {
+				c.remove(el)
+				c.stats.RecordEviction()
+			}
+		}
+	})
 }
 
 // expireEntries removes expired entries.
@@ -438,6 +480,11 @@ func WithExpireAfterAccess(d time.Duration) Option {
 func WithExpireAfterWrite(d time.Duration) Option {
 	return func(c *localCache) {
 		c.expireAfterWrite = d
+
+		// only set expireAfterWrite, expireEntries is invalid
+		if c.expireAfterAccess <= 0 {
+			c.expireAfterAccess = d
+		}
 	}
 }
 
@@ -446,6 +493,12 @@ func WithExpireAfterWrite(d time.Duration) Option {
 func WithRefreshAfterWrite(d time.Duration) Option {
 	return func(c *localCache) {
 		c.refreshAfterWrite = d
+	}
+}
+
+func WithFullGcDuration(d time.Duration) Option {
+	return func(c *localCache) {
+		c.fullGcDuration = d
 	}
 }
 
