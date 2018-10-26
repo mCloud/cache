@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/goburrow/cache"
+	"github.com/mCloud/cache"
 )
 
 type Reporter interface {
